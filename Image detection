@@ -1,0 +1,199 @@
+!pip install tensorflow[and-cuda]
+
+!nvidia-smi
+
+import tensorflow as tf
+
+print(tf.config.list_physical_devices())
+
+!pip install tf-slim
+
+import tensorflow.compat.v1 as tf
+tf.compat.v1.disable_v2_behavior()
+import os
+
+BATCH_SIZE = 32
+
+import urllib.request
+import tarfile
+import os
+
+url = "http://download.tensorflow.org/data/flowers.tar.gz"
+download_path = "flowers.tar.gz"
+
+print("Downloading...")
+urllib.request.urlretrieve(url, download_path)
+
+print("Extracting...")
+with tarfile.open(download_path, "r:gz") as tar:
+    tar.extractall(".")
+
+print("Done! Files saved to flowers/")
+
+# TFRecords are in current directory in Colab
+train_files = [f for f in os.listdir(".") if "flowers_train" in f]
+val_files   = [f for f in os.listdir(".") if "flowers_validation" in f]
+
+print("Train files:", train_files)
+print("Validation files:", val_files)
+
+from __future__ import absolute_import, division, print_function
+import matplotlib.pyplot as plt
+
+import numpy as np
+import os
+import tensorflow.compat.v1 as tf
+tf.compat.v1.disable_v2_behavior()
+import tf_slim as slim
+
+tf.reset_default_graph()
+
+# ─── Parse Function ─────────────────────────────────────────────────
+feature_description = {
+    'image/encoded':     tf.io.FixedLenFeature([], tf.string),
+    'image/class/label': tf.io.FixedLenFeature([], tf.int64),
+}
+
+def _parse_function(example_proto, augment=False):
+    features = tf.io.parse_single_example(example_proto, feature_description)
+    image = tf.image.decode_jpeg(features['image/encoded'], channels=3)
+    image = tf.image.resize_images(image, [224, 224])
+    if augment:
+        image = tf.image.random_flip_left_right(image)
+        image = tf.image.random_brightness(image, max_delta=0.2)
+        image = tf.image.random_contrast(image, lower=0.8, upper=1.2)
+        image = tf.image.random_saturation(image, lower=0.8, upper=1.2)
+        image = tf.clip_by_value(image, 0.0, 255.0)
+    image = (image / 127.5) - 1.0
+    label = features['image/class/label']  # ✅ removed - 1
+    return image, label
+
+# ─── Dataset ────────────────────────────────────────────────────────
+# TFRecords are in current directory in Colab
+train_files = [f for f in os.listdir(".") if "flowers_train" in f]
+val_files   = [f for f in os.listdir(".") if "flowers_validation" in f]
+BATCH_SIZE  = 32
+
+train_dataset = (tf.data.TFRecordDataset(train_files)
+                 .map(lambda x: _parse_function(x, augment=True))
+                 .shuffle(buffer_size=1000)
+                 .batch(BATCH_SIZE)
+                 .repeat())
+
+val_dataset = (tf.data.TFRecordDataset(val_files)
+               .map(lambda x: _parse_function(x, augment=False))
+               .batch(BATCH_SIZE))
+
+next_element = train_dataset.make_one_shot_iterator().get_next()
+next_val     = val_dataset.make_one_shot_iterator().get_next()
+
+# ─── Placeholders ───────────────────────────────────────────────────
+num_classes = 5
+inputs      = tf.placeholder(tf.float32, [None, 224, 224, 3], name='inputs')
+labels      = tf.placeholder(tf.int64,   [None],              name='labels')
+keep_prob   = tf.placeholder(tf.float32,                      name='keep_prob')
+is_training = tf.placeholder(tf.bool,                         name='is_training')
+
+# ─── Model ──────────────────────────────────────────────────────────
+
+def batch_norm(x, is_training):
+    mean, variance = tf.nn.moments(x, axes=[0, 1, 2], keep_dims=True)
+    return tf.nn.batch_normalization(x, mean, variance,
+                                      offset=None, scale=None,
+                                      variance_epsilon=1e-5)
+
+net = slim.conv2d(inputs, 32,  [3, 3], scope='conv1')
+net = batch_norm(net, is_training)
+net = slim.max_pool2d(net, [2, 2], scope='pool1') #112*112*32
+
+net = slim.conv2d(net, 64,  [3, 3], scope='conv2')
+net = batch_norm(net, is_training)
+net = slim.max_pool2d(net, [2, 2], scope='pool2') #56*56*64
+
+net = slim.conv2d(net, 128, [3, 3], scope='conv3')
+net = batch_norm(net, is_training)
+net = slim.max_pool2d(net, [2, 2], scope='pool3') #28x28x128
+
+net = slim.conv2d(net, 256, [3, 3], scope='conv4')
+net = batch_norm(net, is_training)
+net = slim.max_pool2d(net, [2, 2], scope='pool4') #14*14*256
+
+net = slim.conv2d(net, 512, [3, 3], scope='conv5')
+net = batch_norm(net, is_training)
+net = slim.max_pool2d(net, [2, 2], scope='pool5') #7*7*512
+
+net = slim.flatten(net, scope='flatten')
+
+net = slim.fully_connected(net, 512, scope='fc1')
+net = slim.dropout(net, keep_prob=keep_prob, scope='dropout1')
+net = slim.fully_connected(net, 256, scope='fc2')
+net = slim.dropout(net, keep_prob=keep_prob, scope='dropout2')
+net = slim.fully_connected(net, 128, scope='fc3')
+net = slim.dropout(net, keep_prob=keep_prob, scope='dropout3')
+net = slim.fully_connected(net, 64, scope='fc4')
+logits = slim.fully_connected(net, num_classes, activation_fn=None, scope='logits')
+
+# ─── Loss & Optimizer ───────────────────────────────────────────────
+loss = tf.losses.sparse_softmax_cross_entropy(labels=labels, logits=logits)
+
+update_ops = tf.get_collection(tf.GraphKeys.UPDATE_OPS)
+with tf.control_dependencies(update_ops):
+    train_op = tf.train.AdamOptimizer(5e-4).minimize(loss)
+
+accuracy = tf.reduce_mean(
+    tf.cast(tf.equal(tf.argmax(logits, 1), labels), tf.float32)
+)
+
+var = slim.get_model_variables()
+total = np.sum([np.prod(v.shape.as_list()) for v in var])
+
+print("Total params:",total)
+
+
+
+# ─── Training ───────────────────────────────────────────────────────
+num_epochs      = 35
+steps_per_epoch = 100
+
+with tf.Session() as sess:
+    sess.run(tf.global_variables_initializer())
+    print("✅ Training started\n")
+
+    for epoch in range(num_epochs):
+        epoch_loss, epoch_acc = 0.0, 0.0
+        for step in range(steps_per_epoch):
+            images_batch, labels_batch = sess.run(next_element)
+            _, l, a = sess.run(
+                [train_op, loss, accuracy],
+                feed_dict={inputs: images_batch, labels: labels_batch,
+                           keep_prob: 0.5, is_training: True}
+            )
+            epoch_loss += l
+            epoch_acc  += a
+
+        print(f"Epoch {epoch+1}/{num_epochs} | "
+              f"Loss={epoch_loss/steps_per_epoch:.4f} | "
+              f"Acc={epoch_acc/steps_per_epoch:.4f}")
+
+    # ─── Validation ─────────────────────────────────────────────────
+    val_images, val_labels_np = sess.run(next_val)
+    val_acc = sess.run(accuracy,
+                       feed_dict={inputs: val_images, labels: val_labels_np,
+                                  keep_prob: 1.0, is_training: False})
+    print(f"\n✅ Final Validation Accuracy: {val_acc:.4f}")
+
+    # ─── Show Predictions ───────────────────────────────────────────
+    class_names = ["daisy", "dandelion", "roses", "sunflowers", "tulips"]
+    preds = sess.run(tf.argmax(logits, 1),
+                     feed_dict={inputs: val_images, labels: val_labels_np,
+                                keep_prob: 1.0, is_training: False})
+
+    for i in range(5):
+        img = (val_images[i] + 1.0) / 2.0
+        plt.imshow(np.clip(img, 0, 1))
+        correct = preds[i] == val_labels_np[i]
+        plt.title(f"Pred: {class_names[preds[i]]} | Actual: {class_names[val_labels_np[i]]}",
+                  color="green" if correct else "red")
+        plt.axis("off")
+        plt.show()
+
